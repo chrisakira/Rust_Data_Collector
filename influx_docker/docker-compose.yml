@@ -21,7 +21,13 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    networks:
+      - internal_web_1
 
 volumes:
   influxdb3_data:
     driver: local
+
+networks:
+  internal_web_1:
+    external: true

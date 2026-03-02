@@ -1,0 +1,27 @@
+services:
+  dollar-brl:
+    image: dollar-brl:latest
+    container_name: dollar-brl
+    restart: unless-stopped
+    ports:
+      - "3000:3000"           # healthcheck endpoint
+    environment:
+      INFLUX_HOST: ${INFLUX_HOST}
+      INFLUX_TOKEN: ${INFLUX_TOKEN}
+      INFLUX_DATABASE: ${INFLUX_DATABASE}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - internal_web_1
+
+volumes:
+  influxdb3_data:
+    driver: local
+
+networks:
+  internal_web_1:
+    external: true
