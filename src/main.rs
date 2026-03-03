@@ -2,6 +2,7 @@ mod api;
 mod influx;
 mod health;
 mod weather;
+mod stock;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -20,9 +21,11 @@ use api::fetch_usd_brl;
 use health::AppState;
 use influx::{InfluxConfig, insert_rate};
 use weather::{fetch_weather, insert_weather};
+use stock::{fetch_stocks, insert_stocks};
 
-const EXCHANGE_POLL_SECS: u64     = 10;
+const EXCHANGE_POLL_SECS: u64     = 60;
 const WEATHER_POLL_SECS:  u64     = 60 * 60 * 24; // 24 hours
+const STOCK_POLL_SECS:    u64     = 60 * 60;      // 1 hour
 const HEALTH_PORT:        u16     = 3000;
 
 // ─── Healthcheck Handler ─────────────────────────────────────────────────────
@@ -53,7 +56,6 @@ async fn exchange_polling_loop(config: InfluxConfig, state: AppState) {
     let mut interval = time::interval(Duration::from_secs(EXCHANGE_POLL_SECS));
 
     loop {
-        interval.tick().await;
         println!("📡 [Exchange] Fetching USD → BRL...");
 
         let (api_ok, api_msg, rate_opt) = match fetch_usd_brl().await {
@@ -81,6 +83,7 @@ async fn exchange_polling_loop(config: InfluxConfig, state: AppState) {
 
         state.update_exchange(api_ok, api_msg, influx_ok, influx_msg).await;
         println!("⏳ [Exchange] Next fetch in {EXCHANGE_POLL_SECS}s\n");
+        interval.tick().await;
     }
 }
 
@@ -90,7 +93,6 @@ async fn weather_polling_loop(config: InfluxConfig, state: AppState) {
     let mut interval = time::interval(Duration::from_secs(WEATHER_POLL_SECS));
 
     loop {
-        interval.tick().await;
         println!("🌤️  [Weather] Fetching 7-day forecast...");
 
         let (api_ok, api_msg, weather_opt) = match fetch_weather().await {
@@ -125,6 +127,43 @@ async fn weather_polling_loop(config: InfluxConfig, state: AppState) {
 
         state.update_weather(api_ok, api_msg, influx_ok, influx_msg).await;
         println!("⏳ [Weather] Next fetch in 24h\n");
+        interval.tick().await;
+    }
+}
+
+// ─── Stock Polling Loop (every hour) ─────────────────────────────────────────
+
+async fn stock_polling_loop(config: InfluxConfig, state: AppState, brapi_token: Option<String>) {
+    let mut interval = time::interval(Duration::from_secs(STOCK_POLL_SECS));
+
+    loop {
+        println!("📊 [Stocks] Fetching Brazilian stock data...");
+
+        let (api_ok, api_msg, stocks_opt) = match fetch_stocks(brapi_token.as_ref()).await {
+            Ok(stocks) => {
+                let msg = format!("Fetched {} stocks successfully", stocks.len());
+                (true, msg, Some(stocks))
+            }
+            Err(e) => {
+                eprintln!("❌ [Stocks] API error: {e}");
+                (false, e.to_string(), None)
+            }
+        };
+
+        let (influx_ok, influx_msg) = match &stocks_opt {
+            Some(stocks) => match insert_stocks(&config, stocks).await {
+                Ok(_)  => (true,  "Write successful".to_string()),
+                Err(e) => {
+                    eprintln!("❌ [Stocks] InfluxDB error: {e}");
+                    (false, e.to_string())
+                }
+            },
+            None => (false, "Skipped — no data from API".to_string()),
+        };
+
+        state.update_stocks(api_ok, api_msg, influx_ok, influx_msg).await;
+        println!("⏳ [Stocks] Next fetch in 1h\n");
+        interval.tick().await;
     }
 }
 
@@ -140,6 +179,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         database: std::env::var("INFLUX_DATABASE")
                     .unwrap_or_else(|_| "exchange-rates".to_string()),
     };
+
+    // Optional BRAPI token (some endpoints may not require it)
+    let brapi_token = std::env::var("BRAPI_TOKEN").ok();
+    
+    if brapi_token.is_some() {
+        println!("🔑 BRAPI token configured");
+    } else {
+        println!("ℹ️  BRAPI token not set (using free tier)");
+    }
 
     let state = AppState::new();
 
@@ -172,6 +220,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exchange_state  = state.clone();
     tokio::spawn(async move {
         exchange_polling_loop(exchange_config, exchange_state).await;
+    });
+
+    // ── Stock loop (every hour) ──
+    let stock_config = config.clone();
+    let stock_state  = state.clone();
+    let stock_token  = brapi_token.clone();
+    tokio::spawn(async move {
+        stock_polling_loop(stock_config, stock_state, stock_token).await;
     });
 
     // ── Weather loop (once per day) ──

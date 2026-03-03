@@ -27,6 +27,8 @@ pub struct HealthResponse {
     pub influxdb: ComponentHealth,      // InfluxDB write (USD/BRL)
     pub weather_api: ComponentHealth,   // Open-Meteo API
     pub weather_influxdb: ComponentHealth, // InfluxDB write (weather)
+    pub stock_api: ComponentHealth,     // BRAPI Stock API
+    pub stock_influxdb: ComponentHealth, // InfluxDB write (stocks)
 }
 
 /// Shared application state updated by polling loops
@@ -50,6 +52,8 @@ impl AppState {
                 influxdb:         degraded(),
                 weather_api:      degraded(),
                 weather_influxdb: degraded(),
+                stock_api:        degraded(),
+                stock_influxdb:   degraded(),
             })),
         }
     }
@@ -93,6 +97,26 @@ impl AppState {
         };
         health.status = compute_overall(&health);
     }
+
+    /// Updates Brazilian stock health.
+    pub async fn update_stocks(
+        &self,
+        api_ok:     bool,
+        api_msg:    String,
+        influx_ok:  bool,
+        influx_msg: String,
+    ) {
+        let mut health = self.health.write().await;
+        health.stock_api = ComponentHealth {
+            status:  if api_ok    { Status::Ok } else { Status::Down },
+            message: api_msg,
+        };
+        health.stock_influxdb = ComponentHealth {
+            status:  if influx_ok { Status::Ok } else { Status::Down },
+            message: influx_msg,
+        };
+        health.status = compute_overall(&health);
+    }
 }
 
 /// Computes the overall status from all components.
@@ -103,6 +127,8 @@ fn compute_overall(h: &HealthResponse) -> Status {
         matches!(h.influxdb.status,         Status::Ok),
         matches!(h.weather_api.status,      Status::Ok),
         matches!(h.weather_influxdb.status, Status::Ok),
+        matches!(h.stock_api.status,        Status::Ok),
+        matches!(h.stock_influxdb.status,   Status::Ok),
     ];
 
     if all.iter().all(|&ok| ok)  { return Status::Ok;       }
